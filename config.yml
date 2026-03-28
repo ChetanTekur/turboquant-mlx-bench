@@ -1,0 +1,5 @@
+# TurboQuant Benchmark Configuration
+model_id: "mlx-community/gemma-2-2b-it-4bit"
+target_context_length: 1000
+num_prompts: 20
+max_gen_tokens: 50

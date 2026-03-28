@@ -4,3 +4,5 @@ numpy
 gradio
 torch
 transformers
+pyyaml
+pandas

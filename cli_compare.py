@@ -4,35 +4,53 @@ from mlx_lm.models.cache import KVCache
 from turbo_cache import TurboKVCache
 import time
 import pandas as pd
-import random
+import yaml
+import os
 
-# A long technical filler to pad context to ~1000 tokens
-LONG_FILLER = """
-The Transformer architecture, introduced in the seminal paper 'Attention is All You Need', 
-revolutionized the field of natural language processing by replacing recurrent neural networks 
-and convolutional layers with a mechanism known as self-attention. This mechanism allows the model 
-to weight the importance of different words in a sequence relative to each other, regardless of 
-their distance. The core components of a Transformer block include multi-head self-attention, 
-layer normalization, and feed-forward neural networks. Each attention head performs a scaled 
-dot-product operation: Attention(Q, K, V) = softmax((QK^T)/sqrt(dk))V. This allows the model to 
-parallelize computations effectively, leading to significant speedups during training and inference. 
-Large Language Models (LLMs) like GPT-4, Llama, and Gemma leverage these Transformer blocks to 
-scale to billions of parameters, capturing complex linguistic patterns and world knowledge. 
-As context windows grow to 32K, 128K, or even 1 million tokens, the memory footprint of the 
-Key-Value (KV) cache becomes the primary bottleneck for on-device deployment. The KV cache 
-stores the keys and values of previous tokens to avoid redundant computations during auto-regressive 
-generation. In FP16, this cache grows linearly with context length, often exceeding the VRAM 
-capacity of mobile devices. TurboQuant addresses this by applying PolarQuant and Quantized 
-Johnson-Lindenstrauss error correction, achieving up to 6x reduction in KV cache size while 
-maintaining near-lossless accuracy. By rotating activations into a polar geometric space, 
-it eliminates the metadata overhead typically associated with traditional quantization. 
-This technology enables high-performance, long-context AI on consumer-grade hardware.
-""" * 5 
+def load_config():
+    default_config = {
+        "model_id": "mlx-community/gemma-2-2b-it-4bit",
+        "target_context_length": 1000,
+        "num_prompts": 20,
+        "max_gen_tokens": 50
+    }
+    if os.path.exists("config.yml"):
+        with open("config.yml", "r") as f:
+            config = yaml.safe_load(f)
+            return {**default_config, **config}
+    return default_config
 
-def run_benchmark(n_prompts=20):
-    print(f"🚀 Loading model: mlx-community/gemma-2-2b-it-4bit...")
-    model, tokenizer = load("mlx-community/gemma-2-2b-it-4bit")
+def get_context_filler(target_len, tokenizer):
+    base_text = "The Transformer architecture has revolutionized natural language processing. "
+    current_text = base_text
+    current_tokens = len(tokenizer.encode(current_text))
     
+    # Simple multiplier estimation
+    multiplier = (target_len // current_tokens) + 1
+    full_text = base_text * multiplier
+    
+    # Trim to match more closely
+    tokens = tokenizer.encode(full_text)
+    if len(tokens) > target_len:
+        # This is a bit rough but works for padding
+        full_text = tokenizer.decode(tokens[:target_len])
+        
+    return full_text
+
+def run_benchmark():
+    config = load_config()
+    model_id = config["model_id"]
+    target_len = config["target_context_length"]
+    n_prompts = config["num_prompts"]
+    max_tokens = config["max_gen_tokens"]
+
+    print(f"🚀 Loading model: {model_id}...")
+    try:
+        model, tokenizer = load(model_id)
+    except Exception as e:
+        print(f"❌ Failed to load model {model_id}: {e}")
+        return
+
     base_prompts = [
         "Explain the importance of low-latency AI.",
         "How does quantization work in neural networks?",
@@ -56,35 +74,42 @@ def run_benchmark(n_prompts=20):
         "What is temperature in LLM sampling?"
     ]
     
+    # Adjust list to match num_prompts
+    while len(base_prompts) < n_prompts:
+        base_prompts.extend(base_prompts)
+    base_prompts = base_prompts[:n_prompts]
+
+    print(f"📝 Generating filler text for target context: {target_len} tokens...")
+    filler = get_context_filler(target_len, tokenizer)
+    
     results = []
     num_layers = len(model.layers)
     head_dim = model.args.head_dim
     
     print(f"📊 Running benchmark for {n_prompts} prompts...")
-    print(f"🎯 Target Context Length: >1000 tokens\n")
+    print(f"🎯 Target Context Length: ~{target_len} tokens\n")
     
-    for i, base_p in enumerate(base_prompts[:n_prompts]):
-        prompt = LONG_FILLER + "\n\nTask: " + base_p
+    for i, base_p in enumerate(base_prompts):
+        prompt = filler + "\n\nTask: " + base_p
         input_len = len(tokenizer.encode(prompt))
         
         # --- PASS 1: BASELINE ---
-        print(f"[{i+1}/{n_prompts}] Input: {input_len} tokens. Testing Baseline...", end="\r")
+        print(f"[{i+1}/{n_prompts}] Context: {input_len} tokens. Testing Baseline...", end="\r")
         baseline_caches = [KVCache() for _ in range(num_layers)]
         start_t = time.time()
-        out_len = 0
-        for _ in generate(model, tokenizer, prompt=prompt, max_tokens=50, prompt_cache=baseline_caches):
-            out_len += 1
+        for _ in generate(model, tokenizer, prompt=prompt, max_tokens=max_tokens, prompt_cache=baseline_caches):
+            pass
         latency_baseline = time.time() - start_t
         
         # --- PASS 2: TURBOQUANT ---
-        print(f"[{i+1}/{n_prompts}] Input: {input_len} tokens. Testing TurboQuant...", end="\r")
+        print(f"[{i+1}/{n_prompts}] Context: {input_len} tokens. Testing TurboQuant...", end="\r")
         turbo_caches = [TurboKVCache(d_head=head_dim) for _ in range(num_layers)]
         start_t = time.time()
-        for _ in generate(model, tokenizer, prompt=prompt, max_tokens=50, prompt_cache=turbo_caches):
+        for _ in generate(model, tokenizer, prompt=prompt, max_tokens=max_tokens, prompt_cache=turbo_caches):
             pass
         latency_turbo = time.time() - start_t
         
-        # Memory Stats from TurboPass (which tracks both)
+        # Memory Stats from TurboPass
         total_baseline_mb = 0
         total_turbo_mb = 0
         for cache in turbo_caches:
@@ -98,8 +123,8 @@ def run_benchmark(n_prompts=20):
             "Turbo RAM (MB)": total_turbo_mb,
             "Latency Base (s)": latency_baseline,
             "Latency Turbo (s)": latency_turbo,
-            "TPS Base": 50 / latency_baseline,
-            "TPS Turbo": 50 / latency_turbo
+            "TPS Base": max_tokens / latency_baseline,
+            "TPS Turbo": max_tokens / latency_turbo
         })
 
     print("\n\n✅ Benchmark Complete!")
@@ -108,7 +133,8 @@ def run_benchmark(n_prompts=20):
     
     # Calculate Averages
     summary = pd.DataFrame([{
-        "Avg Input": round(df["Input Len"].mean(), 1),
+        "Model": model_id,
+        "Avg Context": round(df["Input Len"].mean(), 1),
         "Avg Baseline RAM": f"{df['Baseline RAM (MB)'].mean():.2f} MB",
         "Avg Turbo RAM": f"{df['Turbo RAM (MB)'].mean():.2f} MB",
         "Avg RAM Reduction": f"{df['RAM Reduction'].mean():.2f}x",
@@ -125,4 +151,4 @@ def run_benchmark(n_prompts=20):
     print(df[["Input Len", "Baseline RAM (MB)", "Turbo RAM (MB)", "Latency Base (s)", "Latency Turbo (s)"]].round(3).to_string())
 
 if __name__ == "__main__":
-    run_benchmark(n_prompts=20)
+    run_benchmark()
