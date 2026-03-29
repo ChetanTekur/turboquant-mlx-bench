@@ -51,3 +51,6 @@ python3 cli_compare.py
 
 ## 💡 Note
 The current implementation simulates the information-theoretic bit-width of TurboQuant (3-bit) within the real MLX inference loop to provide accurate architectural comparisons for on-device deployment planning.
+
+## 📄 License
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
