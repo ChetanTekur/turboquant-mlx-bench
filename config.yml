@@ -1,5 +1,5 @@
 # TurboQuant Benchmark Configuration
 model_id: "mlx-community/gemma-2-2b-it-4bit"
-target_context_length: 1000
-num_prompts: 20
+target_context_length: 16000
+num_prompts: 5 # Reduced count for 16k tests to save time
 max_gen_tokens: 50

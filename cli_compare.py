@@ -6,12 +6,13 @@ import time
 import pandas as pd
 import yaml
 import os
+import random
 
 def load_config():
     default_config = {
         "model_id": "mlx-community/gemma-2-2b-it-4bit",
-        "target_context_length": 1000,
-        "num_prompts": 20,
+        "target_context_length": 16000,
+        "num_prompts": 5,
         "max_gen_tokens": 50
     }
     if os.path.exists("config.yml"):
@@ -21,21 +22,21 @@ def load_config():
     return default_config
 
 def get_context_filler(target_len, tokenizer):
-    base_text = "The Transformer architecture has revolutionized natural language processing. "
-    current_text = base_text
-    current_tokens = len(tokenizer.encode(current_text))
+    subjects = ["Transformer", "KV cache", "Apple Silicon", "Quantization", "Metal kernel", "MLX", "PolarQuant", "QJL", "Unified Memory", "Attention mechanism", "MatFormer", "NPU", "VRAM", "Throughput", "Latency", "Gradient descent", "Activation function", "Embeddings", "Tokenizer", "Inference"]
+    verbs = ["optimizes", "revolutionizes", "scales", "reduces", "implements", "accelerates", "manages", "allocates", "quantizes", "parallelizes", "enhances", "distributes", "computes", "linearizes", "stabilizes"]
+    objects = ["memory bandwidth", "inference throughput", "latency", "bit-precision", "multimodal activations", "tensor allocation", "gradient flow", "residual connections", "context window", "on-device performance", "floating point error", "normalization layer", "subspace representation", "elastic inference", "hardware utilization"]
+    adjectives = ["highly efficient", "state-of-the-art", "low-latency", "near-lossless", "recursive", "asynchronous", "deterministic", "hardware-accelerated", "nonlinear", "geometric", "probabilistic", "sparse", "dense", "stochastic", "parallel"]
     
-    # Simple multiplier estimation
-    multiplier = (target_len // current_tokens) + 1
-    full_text = base_text * multiplier
-    
-    # Trim to match more closely
-    tokens = tokenizer.encode(full_text)
-    if len(tokens) > target_len:
-        # This is a bit rough but works for padding
-        full_text = tokenizer.decode(tokens[:target_len])
+    sentences = []
+    current_tokens = 0
+    while current_tokens < target_len:
+        s = f"The {random.choice(adjectives)} {random.choice(subjects)} {random.choice(verbs)} {random.choice(objects)} in {random.choice(adjectives)} environments."
+        sentences.append(s)
+        current_tokens += len(tokenizer.encode(s))
         
-    return full_text
+    full_text = " ".join(sentences)
+    tokens = tokenizer.encode(full_text)
+    return tokenizer.decode(tokens[:target_len])
 
 def run_benchmark():
     config = load_config()
@@ -51,35 +52,12 @@ def run_benchmark():
         print(f"❌ Failed to load model {model_id}: {e}")
         return
 
-    base_prompts = [
-        "Explain the importance of low-latency AI.",
-        "How does quantization work in neural networks?",
-        "Write a short story about a robot learning to paint.",
-        "What are the benefits of Apple Silicon for ML?",
-        "Summarize the history of deep learning.",
-        "How do transformers handle long sequences?",
-        "Explain backpropagation like I am five.",
-        "What is the difference between FP16 and INT4?",
-        "Write a Python function to sort a list.",
-        "Describe the architecture of Gemma 2B.",
-        "What is a KV cache in LLMs?",
-        "How does flash attention speed up inference?",
-        "Explain the concept of weight tying.",
-        "What are residual connections?",
-        "Write a haiku about memory bandwidth.",
-        "Describe the impact of MoE models.",
-        "What is the goal of distal supervision?",
-        "How does LoRA fine-tuning work?",
-        "Explain the role of the tokenizer.",
-        "What is temperature in LLM sampling?"
-    ]
-    
-    # Adjust list to match num_prompts
+    base_prompts = ["Explain memory efficiency.", "Describe LLM scaling.", "What is on-device AI?", "How to optimize kernels?", "Summarize self-attention."]
     while len(base_prompts) < n_prompts:
         base_prompts.extend(base_prompts)
     base_prompts = base_prompts[:n_prompts]
 
-    print(f"📝 Generating filler text for target context: {target_len} tokens...")
+    print(f"📝 Generating high-entropy technical context (~{target_len} tokens)...")
     filler = get_context_filler(target_len, tokenizer)
     
     results = []
@@ -87,11 +65,13 @@ def run_benchmark():
     head_dim = model.args.head_dim
     
     print(f"📊 Running benchmark for {n_prompts} prompts...")
-    print(f"🎯 Target Context Length: ~{target_len} tokens\n")
     
     for i, base_p in enumerate(base_prompts):
         prompt = filler + "\n\nTask: " + base_p
         input_len = len(tokenizer.encode(prompt))
+        
+        # Clear cache before baseline
+        mx.metal.clear_cache()
         
         # --- PASS 1: BASELINE ---
         print(f"[{i+1}/{n_prompts}] Context: {input_len} tokens. Testing Baseline...", end="\r")
@@ -101,6 +81,9 @@ def run_benchmark():
             pass
         latency_baseline = time.time() - start_t
         
+        # Clear cache before turbo
+        mx.metal.clear_cache()
+        
         # --- PASS 2: TURBOQUANT ---
         print(f"[{i+1}/{n_prompts}] Context: {input_len} tokens. Testing TurboQuant...", end="\r")
         turbo_caches = [TurboKVCache(d_head=head_dim) for _ in range(num_layers)]
@@ -109,7 +92,6 @@ def run_benchmark():
             pass
         latency_turbo = time.time() - start_t
         
-        # Memory Stats from TurboPass
         total_baseline_mb = 0
         total_turbo_mb = 0
         for cache in turbo_caches:
@@ -131,7 +113,6 @@ def run_benchmark():
     df = pd.DataFrame(results)
     df["RAM Reduction"] = df["Baseline RAM (MB)"] / df["Turbo RAM (MB)"]
     
-    # Calculate Averages
     summary = pd.DataFrame([{
         "Model": model_id,
         "Avg Context": round(df["Input Len"].mean(), 1),
